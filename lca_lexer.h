@@ -1,9 +1,96 @@
+/*
+This software is available under 2 licenses -- choose whichever you prefer.
+------------------------------------------------------------------------------
+ALTERNATIVE A - MIT License
+Copyright (c) 2024 Local Atticus
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+------------------------------------------------------------------------------
+ALTERNATIVE B - Public Domain (www.unlicense.org)
+This is free and unencumbered software released into the public domain.
+Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+software, either in source code form or as a compiled binary, for any purpose,
+commercial or non-commercial, and by any means.
+In jurisdictions that recognize copyright laws, the author or authors of this
+software dedicate any and all copyright interest in the software to the public
+domain. We make this dedication for the benefit of the public at large and to
+the detriment of our heirs and successors. We intend this dedication to be an
+overt act of relinquishment in perpetuity of all present and future rights to
+this software under copyright law.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+
+/*
+ */
+
 #ifndef LCA_LEXER_H
 #define LCA_LEXER_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+
+#if !defined(LCA_INCLUDED)
+#    include <assert.h>
+
+#    define LCA_ASSERT(Condition, Message) assert((Condition) && Message)
+
+#    if defined(LCA_LEXER_MALLOC) || defined(LCA_LEXER_REALLOC) || defined(LCA_LEXER_DEALLOC)
+#        if !defined(LCA_LEXER_MALLOC) || !defined(LCA_LEXER_REALLOC) || !defined(LCA_LEXER_DEALLOC)
+#            error "The LCA Lexer library requires all three of LCA_LEXER_MALLOC, LCA_LEXER_REALLOC and LCA_LEXER_DEALLOC to be defined if at least one is."
+#        endif
+#    else
+#        define LCA_LEXER_MALLOC(N)     (malloc(N))
+#        define LCA_LEXER_REALLOC(P, N) (realloc(P, N))
+#        define LCA_LEXER_FREE(P)       (free(P))
+#    endif
+
+#    define lca_da(T)            T*
+#    define lca_da_get_header(V) (((struct lca_da_header*)(V)) - 1)
+#    define lca_da_count(V)      ((V) ? lca_da_get_header(V)->count : 0)
+#    define lca_da_capacity(V)   ((V) ? lca_da_get_header(V)->capacity : 0)
+#    define lca_da_push(V, E)                                                             \
+        do {                                                                              \
+            lca_da_maybe_expand((void**)&(V), (int64_t)sizeof *(V), lca_da_count(V) + 1); \
+            (V)[lca_da_count(V)] = E;                                                     \
+            lca_da_get_header(V)->count++;                                                \
+        } while (0)
+#define lca_da_pop(V)                                                   \
+    do {                                                                \
+        if (lca_da_get_header(V)->count) lca_da_get_header(V)->count--; \
+    } while (0)
+
+void lca_da_maybe_expand(void** da_ref, int64_t element_size, int64_t required_count);
+
+/// Header data for a light-weight implelentation of typed dynamic arrays.
+typedef struct lca_da_header {
+    int64_t capacity;
+    int64_t count;
+} lca_da_header;
+
+typedef struct lca_string_view {
+    const char* data;
+    int64_t count;
+} lca_string_view;
+#endif // !defined(LCA_INCLUDED)
 
 typedef struct lca_lexer lca_lexer;
 typedef struct lca_lexer_token lca_lexer_token;
@@ -16,6 +103,9 @@ typedef bool (*lca_lexer_character_decoder)(const char* data, int data_count, in
 typedef void (*lca_lexer_error_handler)(const char* source_where_position, int source_character, const char* message);
 
 struct lca_lexer {
+    /// The name of the source being lexed.
+    lca_string_view name;
+
     /// Pointer to the start of the source text to lex (its first character).
     const char* source_begin;
     /// Pointer to the end of the source text (one past its last character).
@@ -42,17 +132,19 @@ struct lca_lexer {
     int current_character_stride;
 };
 
+typedef struct lca_lexer_init_args {
+    void* allocator_userdata;
+    lca_lexer_allocator_function allocator_function;
+    lca_lexer_character_decoder character_decoder;
+} lca_lexer_init_args;
+
 struct lca_lexer_token {
     int kind;
-
-    const char* source_begin;
-    const char* source_end;
+    lca_string_view source_text;
 
     int64_t integer_value;
-    double float_value;
-
-    const char* string_value;
-    size_t string_value_length;
+    double real_value;
+    lca_string_view string_value;
 };
 
 typedef struct {
@@ -61,12 +153,63 @@ typedef struct {
     size_t allocated_count;
 } lca_lexer_buffered_allocator_userdata;
 
+#ifdef LCA_LEXER_LANGUAGE_C
+
+typedef struct lca_lexer_c_token {
+    // all the same things as lca_lexer_token
+
+    int kind;
+    lca_string_view source_text;
+
+    int64_t integer_value;
+    double real_value;
+    lca_string_view string_value;
+
+    // but also preprocessor things
+
+    bool is_macro_param;
+    int macro_param_index;
+    bool is_angle_string;
+} lca_lexer_c_token;
+
+typedef struct lca_lexer_c_macro_def {
+    const char* name;
+    size_t name_length;
+
+    bool has_params;
+    lca_da(lca_string_view) params;
+    lca_da(lca_lexer_token) body;
+} lca_lexer_c_macro_def;
+
+typedef struct lca_lexer_c_macro_expansion {
+    lca_lexer_c_macro_def* def;
+    int64_t body_position;
+    lca_da(lca_da(lca_lexer_token)) args;
+    int64_t arg_index; // set to -1 when not expanding an argument
+    int64_t arg_position;
+} lca_lexer_c_macro_expansion;
+
+typedef struct lca_lexer_cpp {
+    /// True if the lexer is within the preprocessor, false otherwise.
+    /// When the preprocessor is provided to the C lexer functions, some lexer features (like consuming newline characters)
+    /// are conditional on whether or not the preprocess is active.
+    /// When no preprocessor is given to the C lexer functions, it is assumed to be inactive.
+    bool active;
+    bool at_start_of_line;
+    bool is_in_include;
+
+    lca_da(lca_lexer_c_macro_expansion) macro_expansions;
+} lca_lexer_cpp;
+
+#endif // LCA_LEXER_LANGUAGE_C
+
 /// Initialize the lexer with a given range of source text.
 /// This default initialization routine will rely on libc's `malloc` to allocate necessary memory.
-void lca_lexer_init(lca_lexer* lexer, const char* source_begin, const char* source_end);
-void lca_lexer_init_buffered(lca_lexer* lexer, const char* source_begin, const char* source_end, lca_lexer_buffered_allocator_userdata* buffered_allocator_userdata);
+void lca_lexer_init(lca_lexer* lexer, const char* name, int64_t name_length, const char* source_begin, const char* source_end);
+// void lca_lexer_init_all(lca_lexer* lexer, const char* name, int64_t name_length, const char* source_begin, const char* source_end, lca_lexer_init_args args);
+void lca_lexer_init_buffered(lca_lexer* lexer, const char* name, int64_t name_length, const char* source_begin, const char* source_end, lca_lexer_buffered_allocator_userdata* buffered_allocator_userdata);
 // void lca_lexer_init_buffered(lca_lexer* lexer, const char* source_begin, const char* source_end, char* string_buffer, size_t string_buffer_size);
-void lca_lexer_init_allocator(lca_lexer* lexer, const char* source_begin, const char* source_end, void* allocator_userdata, lca_lexer_allocator_function allocator_function);
+void lca_lexer_init_allocator(lca_lexer* lexer, const char* name, int64_t name_length, const char* source_begin, const char* source_end, void* allocator_userdata, lca_lexer_allocator_function allocator_function);
 
 int lca_lexer_next_character(lca_lexer* lexer);
 int lca_lexer_peek_next_character(lca_lexer* lexer);
@@ -85,10 +228,17 @@ void lca_lexer_prime_next_character(lca_lexer* lexer);
 /// Returns true if the character was a valid UTF-8 encoded character, false otherwise.
 bool lca_lexer_decode_utf8(const char* data, int data_count, int* out_character, int* out_character_stride);
 
+#ifdef LCA_LEXER_LANGUAGE_C
+
 const char* lca_lexer_c_token_kind_to_string(int c_token_kind);
-void lca_lexer_skip_c_whitespace(lca_lexer* lexer);
-lca_lexer_token lca_lexer_read_c_token(lca_lexer* lexer);
-lca_lexer_token lca_lexer_read_c_token_no_keywords(lca_lexer* lexer);
+void lca_lexer_skip_c_whitespace(lca_lexer* lexer, lca_lexer_cpp* cpp);
+lca_lexer_c_token lca_lexer_read_c_token(lca_lexer* lexer, lca_lexer_cpp* cpp);
+lca_lexer_c_token lca_lexer_read_c_token_no_keywords(lca_lexer* lexer, lca_lexer_cpp* cpp);
+
+void lca_lexer_cpp_init(lca_lexer_cpp* cpp);
+bool lca_lexer_cpp_is_active(lca_lexer_cpp* cpp);
+
+#endif // LCA_LEXER_LANGUAGE_C
 
 enum {
     LCA_TOKEN_BANG = '!',
@@ -153,6 +303,8 @@ enum {
 
     LCA_TOKEN_TILDE = '~',
 };
+
+#ifdef LCA_LEXER_LANGUAGE_C
 
 enum {
     LCA_TOKEN_C_MODULO = '%',
@@ -280,15 +432,50 @@ enum {
     LCA_TOKEN_C_ENUM_COUNT__ = LCA_TOKEN_C_ENUM_END_VALUE__ - LCA_TOKEN_C_ENUM_MIN_VALUE__,
 };
 
-#ifdef LCA_LEXER_IMPLEMENTATION
+#endif // LCA_LEXER_LANGUAGE_C
+
+#if defined(LCA_IMPLEMENTATION) || defined(LCA_LEXER_IMPLEMENTATION)
 
 #    include <assert.h>
 #    include <stdlib.h>
 #    include <string.h>
 
-void lca_lexer_init(lca_lexer* lexer, const char* source_begin, const char* source_end) {
+#    if !defined(LCA_INCLUDED)
+
+void lca_da_maybe_expand(void** da_ref, int64_t element_size, int64_t required_count) {
+    if (required_count <= 0) return;
+
+    struct lca_da_header* header = lca_da_get_header(*da_ref);
+    if (!*da_ref) {
+        int64_t initial_capacity = 32;
+        void* new_data = LCA_LEXER_MALLOC((sizeof *header) + (size_t)(initial_capacity * element_size));
+        header = new_data;
+
+        header->capacity = initial_capacity;
+        header->count = 0;
+    } else if (required_count > header->capacity) {
+        while (required_count > header->capacity)
+            header->capacity *= 2;
+        header = LCA_LEXER_REALLOC(header, (sizeof *header) + (size_t)(header->capacity * element_size));
+    }
+
+    *da_ref = (void*)(header + 1);
+}
+
+#    endif // !defined(LCA_INCLUDED)
+
+void lca_lexer_init(lca_lexer* lexer, const char* name, int64_t name_length, const char* source_begin, const char* source_end) {
     assert(lexer != NULL);
     memset(lexer, 0, sizeof *lexer);
+
+    if (name_length < 0) {
+        name_length = strlen(name);
+    }
+
+    lexer->name = (lca_string_view){
+        .data = name,
+        .count = name_length,
+    };
 
     lexer->source_begin = source_begin;
     if (source_end == NULL)
@@ -302,15 +489,15 @@ void lca_lexer_init(lca_lexer* lexer, const char* source_begin, const char* sour
     lca_lexer_prime_next_character(lexer);
 }
 
-void lca_lexer_init_buffered(lca_lexer* lexer, const char* source_begin, const char* source_end, lca_lexer_buffered_allocator_userdata* buffered_allocator_userdata) {
-    lca_lexer_init(lexer, source_begin, source_end);
+void lca_lexer_init_buffered(lca_lexer* lexer, const char* name, int64_t name_length, const char* source_begin, const char* source_end, lca_lexer_buffered_allocator_userdata* buffered_allocator_userdata) {
+    lca_lexer_init(lexer, name, name_length, source_begin, source_end);
 
     lexer->allocator_userdata = buffered_allocator_userdata;
     lexer->allocator_function = lca_lexer_buffered_allocator;
 }
 
-void lca_lexer_init_allocator(lca_lexer* lexer, const char* source_begin, const char* source_end, void* allocator_userdata, lca_lexer_allocator_function allocator_function) {
-    lca_lexer_init(lexer, source_begin, source_end);
+void lca_lexer_init_allocator(lca_lexer* lexer, const char* name, int64_t name_length, const char* source_begin, const char* source_end, void* allocator_userdata, lca_lexer_allocator_function allocator_function) {
+    lca_lexer_init(lexer, name, name_length, source_begin, source_end);
 
     lexer->allocator_userdata = allocator_userdata;
     lexer->allocator_function = allocator_function;
@@ -412,7 +599,9 @@ bool lca_lexer_decode_utf8(const char* data, int data_count, int* out_character,
     return true;
 }
 
-// C lexer
+/// C Language Lexer
+
+#    ifdef LCA_LEXER_LANGUAGE_C
 
 const char* lca_lexer_c_token_kind_to_string(int c_token_kind) {
     if (c_token_kind > 32 && c_token_kind < 128) {
@@ -491,10 +680,11 @@ const char* lca_lexer_c_token_kind_to_string(int c_token_kind) {
     }
 }
 
-#    include <stdio.h>
-
-void lca_lexer_skip_c_whitespace(lca_lexer* lexer) {
+void lca_lexer_skip_c_whitespace(lca_lexer* lexer, lca_lexer_cpp* cpp) {
     while (!lca_lexer_is_at_end(lexer)) {
+        if (lca_lexer_cpp_is_active(cpp) && lexer->current_character == '\n')
+            break;
+
         if (lca_lexer_is_whitespace_impl(lexer->current_character)) {
             lca_lexer_next_character(lexer);
         } else if (lexer->current_character == '/' && lca_lexer_peek_next_character(lexer) == '/') {
@@ -526,8 +716,65 @@ void lca_lexer_skip_c_whitespace(lca_lexer* lexer) {
     }
 }
 
-lca_lexer_token lca_lexer_read_c_token(lca_lexer* lexer) {
-    lca_lexer_token token = lca_lexer_read_c_token_no_keywords(lexer);
+static void lca_lexer_c_token_maybe_transform_keyword(lca_lexer_c_token *token) {
+}
+
+lca_lexer_c_token lca_lexer_read_c_token(lca_lexer* lexer, lca_lexer_cpp* cpp) {
+    LCA_ASSERT(lexer != NULL, "lexer missing");
+
+    if (cpp == NULL) {
+        lca_lexer_c_token token = lca_lexer_read_c_token_no_keywords(lexer, cpp);
+        if (token.kind == LCA_TOKEN_C_IDENTIFIER) {
+            lca_lexer_c_token_maybe_transform_keyword(&token);
+        }
+
+        return token;
+    }
+
+    LCA_ASSERT(cpp != NULL, "somehow skipped the early check for CPP presence");
+
+    if (lca_da_count(cpp->macro_expansions) > 0) {
+        LCA_ASSERT(false, "get tokens from current macro expansion");
+        //
+
+        // we can't modify cpp->macro_expansions while we have this reference.
+        lca_lexer_c_macro_expansion* current_macro_expansion = &cpp->macro_expansions[lca_da_count(cpp->macro_expansions) - 1];
+
+        if (current_macro_expansion->arg_index >= 0) {
+
+        } else {
+            LCA_ASSERT(current_macro_expansion->def != NULL, "no macro def associated with this expansion");
+
+            lca_da(lca_lexer_c_token) macro_body = current_macro_expansion->def->body;
+            if (current_macro_expansion->body_position >= lca_da_count(macro_body)) {
+                current_macro_expansion = NULL;
+                lca_da_pop(cpp->macro_expansions);
+                goto regular_lex_c_token;
+            }
+
+            int64_t body_position = current_macro_expansion->body_position;
+        }
+
+        return (lca_lexer_c_token){0};
+    }
+
+regular_lex_c_token:;
+    lca_lexer_skip_c_whitespace(lexer, cpp);
+    while (cpp->at_start_of_line && lexer->current_character == '#') {
+        LCA_ASSERT(false, "parse preprocessor directives");
+        //
+
+        LCA_ASSERT(!lca_lexer_cpp_is_active(cpp), "parsing preprocessor directive left us in a preprocessing state");
+        lca_lexer_skip_c_whitespace(lexer, cpp);
+    }
+
+    lca_lexer_c_token token = lca_lexer_read_c_token_no_keywords(lexer, cpp);
+    if (token.kind == LCA_TOKEN_C_IDENTIFIER) {
+        // TODO(local): lookup macros and spawn expansions and stuff
+    not_a_macro:;
+        lca_lexer_c_token_maybe_transform_keyword(&token);
+    }
+    
     return token;
 }
 
@@ -535,11 +782,11 @@ static bool lca_lexer_character_is_c_identifier_part(int c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
 
-lca_lexer_token lca_lexer_read_c_token_no_keywords(lca_lexer* lexer) {
-    lca_lexer_skip_c_whitespace(lexer);
+lca_lexer_c_token lca_lexer_read_c_token_no_keywords(lca_lexer* lexer, lca_lexer_cpp* cpp) {
+    lca_lexer_skip_c_whitespace(lexer, cpp);
 
-    lca_lexer_token token = {
-        .source_begin = lexer->source_current,
+    lca_lexer_c_token token = {
+        .source_text.data = lexer->source_current,
     };
 
     if (lca_lexer_is_at_end(lexer)) {
@@ -549,94 +796,73 @@ lca_lexer_token lca_lexer_read_c_token_no_keywords(lca_lexer* lexer) {
 
     int current_character = lexer->current_character;
     switch (current_character) {
-        case '(':
-        case ')':
-        case '[':
-        case ']':
-        case '{':
-        case '}':
-        case ',':
-        case ';':
-        case ':': {
+        case '\n': {
+            LCA_ASSERT(lca_lexer_cpp_is_active(cpp), "should only encounter the newline character in the main C token lexer switch if the preprocessor is active.");
+            lca_lexer_next_character(lexer);
+            token.kind = '\n';
+            if (lexer->current_character != 0 && lexer->source_current < lexer->source_end) LCA_ASSERT(cpp->at_start_of_line, "after newline, should always be at start of line");
+        } break;
+
+            // clang-format off
+        case '(': case ')':
+        case '[': case ']':
+        case '{': case '}':
+        case ',': case ';': case ':': {
+            // clang-format on
             lca_lexer_next_character(lexer);
             token.kind = current_character;
         } break;
 
+            // clang-format off
         case '_':
-        case 'a':
-        case 'b':
-        case 'c':
-        case 'd':
-        case 'e':
-        case 'f':
-        case 'g':
-        case 'h':
-        case 'i':
-        case 'j':
-        case 'k':
-        case 'l':
-        case 'm':
-        case 'n':
-        case 'o':
-        case 'p':
-        case 'q':
-        case 'r':
-        case 's':
-        case 't':
-        case 'u':
-        case 'v':
-        case 'w':
-        case 'x':
-        case 'y':
+        case 'a': case 'b': case 'c': case 'd': case 'e':
+        case 'f': case 'g': case 'h': case 'i': case 'j':
+        case 'k': case 'l': case 'm': case 'n': case 'o':
+        case 'p': case 'q': case 'r': case 's': case 't':
+        case 'u': case 'v': case 'w': case 'x': case 'y':
         case 'z':
-        case 'A':
-        case 'B':
-        case 'C':
-        case 'D':
-        case 'E':
-        case 'F':
-        case 'G':
-        case 'H':
-        case 'I':
-        case 'J':
-        case 'K':
-        case 'L':
-        case 'M':
-        case 'N':
-        case 'O':
-        case 'P':
-        case 'Q':
-        case 'R':
-        case 'S':
-        case 'T':
-        case 'U':
-        case 'V':
-        case 'W':
-        case 'X':
-        case 'Y':
+        case 'A': case 'B': case 'C': case 'D': case 'E':
+        case 'F': case 'G': case 'H': case 'I': case 'J':
+        case 'K': case 'L': case 'M': case 'N': case 'O':
+        case 'P': case 'Q': case 'R': case 'S': case 'T':
+        case 'U': case 'V': case 'W': case 'X': case 'Y':
         case 'Z': {
+            // clang-format on
             while (!lca_lexer_is_at_end(lexer) && lca_lexer_character_is_c_identifier_part(lexer->current_character)) {
                 lca_lexer_next_character(lexer);
             }
 
             token.kind = LCA_TOKEN_C_IDENTIFIER;
-            token.string_value = token.source_begin;
-            token.string_value_length = lexer->source_current - token.source_begin;
+            token.string_value = (lca_string_view){
+                .data = token.source_text.data,
+                .count = lexer->source_current - token.source_text.data
+            };
         } break;
 
         default: {
-            assert(false && "unhandled character in C token read, report error");
+            LCA_ASSERT(false, "unhandled character in C token read, report error");
         }
     }
 
-    assert(token.kind != 0 && "C token read did not populate the token kind, oops");
+    LCA_ASSERT(token.kind != 0, "C token read did not populate the token kind, oops");
 
-    token.source_end = lexer->source_current;
-    assert(token.source_end > token.source_begin && "C token read did not consume any characters, oops");
+    token.source_text.count = lexer->source_current - token.source_text.data;
+    LCA_ASSERT(token.source_text.count > 0, "C token read did not consume any characters, oops");
 
     return token;
 }
 
-#endif // LCA_LEXER_IMPLEMENTATION
+void lca_lexer_cpp_init(lca_lexer_cpp* cpp) {
+    if (cpp == NULL) return;
+    *cpp = (lca_lexer_cpp){0};
+}
+
+bool lca_lexer_cpp_is_active(lca_lexer_cpp* cpp) {
+    return cpp == NULL ? false : cpp->active;
+}
+
+#    endif // LCA_LEXER_LANGUAGE_C
+
+#endif // defined(LCA_IMPLEMENTATION) || defined(LCA_LEXER_IMPLEMENTATION)
 
 #endif // !LCA_LEXER_H
