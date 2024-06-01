@@ -73,10 +73,10 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
             (V)[lca_da_count(V)] = E;                                                     \
             lca_da_get_header(V)->count++;                                                \
         } while (0)
-#define lca_da_pop(V)                                                   \
-    do {                                                                \
-        if (lca_da_get_header(V)->count) lca_da_get_header(V)->count--; \
-    } while (0)
+#    define lca_da_pop(V)                                                   \
+        do {                                                                \
+            if (lca_da_get_header(V)->count) lca_da_get_header(V)->count--; \
+        } while (0)
 
 void lca_da_maybe_expand(void** da_ref, int64_t element_size, int64_t required_count);
 
@@ -178,13 +178,13 @@ typedef struct lca_lexer_c_macro_def {
 
     bool has_params;
     lca_da(lca_string_view) params;
-    lca_da(lca_lexer_token) body;
+    lca_da(lca_lexer_c_token) body;
 } lca_lexer_c_macro_def;
 
 typedef struct lca_lexer_c_macro_expansion {
     lca_lexer_c_macro_def* def;
     int64_t body_position;
-    lca_da(lca_da(lca_lexer_token)) args;
+    lca_da(lca_da(lca_lexer_c_token)) args;
     int64_t arg_index; // set to -1 when not expanding an argument
     int64_t arg_position;
 } lca_lexer_c_macro_expansion;
@@ -527,18 +527,32 @@ int lca_lexer_next_character(lca_lexer* lexer) {
     return lexer->current_character;
 }
 
-int lca_lexer_peek_next_character(lca_lexer* lexer) {
+int lca_lexer_peek_nth_character(lca_lexer* lexer, int n) {
+    if (n == 0) return lexer->current_character;
+
     const char* source_current = lexer->source_current;
-    if (source_current + lexer->current_character_stride >= lexer->source_end) {
-        return 0;
-    }
+    int current_character_stride = lexer->current_character_stride;
 
     int peek_character = 0;
-    if (!lexer->character_decoder(lexer->source_current + lexer->current_character_stride, (int)(lexer->source_end - (lexer->source_current + lexer->current_character_stride)), &peek_character, NULL)) {
-        return 0;
+
+    for (int i = 0; i < n; i++) {
+        if (source_current + current_character_stride >= lexer->source_end) {
+            return 0;
+        }
+
+        const char* source_next = source_current + current_character_stride;
+        if (!lexer->character_decoder(source_current + current_character_stride, (int)(lexer->source_end - (source_current + current_character_stride)), &peek_character, &current_character_stride)) {
+            return 0;
+        }
+
+        source_current = source_next;
     }
 
     return peek_character;
+}
+
+int lca_lexer_peek_next_character(lca_lexer* lexer) {
+    return lca_lexer_peek_nth_character(lexer, 1);
 }
 
 bool lca_lexer_is_at_end(lca_lexer* lexer) {
@@ -680,43 +694,119 @@ const char* lca_lexer_c_token_kind_to_string(int c_token_kind) {
     }
 }
 
-void lca_lexer_skip_c_whitespace(lca_lexer* lexer, lca_lexer_cpp* cpp) {
-    while (!lca_lexer_is_at_end(lexer)) {
-        if (lca_lexer_cpp_is_active(cpp) && lexer->current_character == '\n')
-            break;
+static bool lca_lexer_c_skip_backslash_newline(lca_lexer* lexer, lca_lexer_cpp* cpp) {
+    LCA_ASSERT(lexer != NULL, "lexer missing");
 
-        if (lca_lexer_is_whitespace_impl(lexer->current_character)) {
+    if (!lca_lexer_is_at_end(lexer) && lexer->current_character == '\\' &&
+        (lca_lexer_peek_next_character(lexer) == '\n' || (lca_lexer_peek_next_character(lexer) == '\r' && lca_lexer_peek_nth_character(lexer, 2) == '\n'))) {
+        lca_lexer_next_character(lexer);
+        LCA_ASSERT(!lca_lexer_is_at_end(lexer), "checked for multiple characters, but only one could be consumed");
+
+        if (lexer->current_character == '\n') {
             lca_lexer_next_character(lexer);
-        } else if (lexer->current_character == '/' && lca_lexer_peek_next_character(lexer) == '/') {
-            while (!lca_lexer_is_at_end(lexer) && lexer->current_character != '\n') {
+            if (!lca_lexer_is_at_end(lexer) && lexer->current_character == '\r')
+                lca_lexer_next_character(lexer);
+        } else {
+            LCA_ASSERT(lexer->current_character == '\r' && lca_lexer_peek_next_character(lexer) == '\n', "checked for \r\n, but didn't see it");
+            lca_lexer_next_character(lexer);
+            lca_lexer_next_character(lexer);
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+static void lca_lexer_c_next_character(lca_lexer* lexer, lca_lexer_cpp* cpp, bool allow_comments) {
+    LCA_ASSERT(lexer != NULL, "lexer missing");
+
+    lca_lexer_next_character(lexer);
+
+    if (lexer->current_character == '\n') {
+        if (cpp) cpp->at_start_of_line = true;
+    } else if (!lca_lexer_is_whitespace_impl(lexer->current_character) && lexer->current_character != 0) {
+        if (cpp) cpp->at_start_of_line = false;
+    }
+
+    while (lca_lexer_c_skip_backslash_newline(lexer, cpp)) {}
+    if (lca_lexer_is_at_end(lexer)) return;
+
+    if (allow_comments && lexer->current_character == '/') {
+        if (lca_lexer_peek_next_character(lexer) == '/') {
+            lca_lexer_next_character(lexer);
+            lca_lexer_next_character(lexer);
+
+            bool has_warned = false;
+
+            while (!lca_lexer_is_at_end(lexer)) {
+                if (lexer->current_character == '\\' && lca_lexer_c_skip_backslash_newline(lexer, cpp)) {
+                    if (!has_warned) {
+                        LCA_ASSERT(false, "issue a warning for multi-line // comment");
+                    }
+
+                    has_warned = true;
+                    continue;
+                }
+
+                if (lexer->current_character == '\n') {
+                    break;
+                }
+
                 lca_lexer_next_character(lexer);
             }
-        } else if (lexer->current_character == '/' && lca_lexer_peek_next_character(lexer) == '*') {
+
+            LCA_ASSERT(lca_lexer_is_at_end(lexer) || lexer->current_character == '\n', "invalid place to end a // comment");
+            lexer->current_character = ' ';
+        } else if (lca_lexer_peek_next_character(lexer) == '*') {
             lca_lexer_next_character(lexer);
             lca_lexer_next_character(lexer);
 
             int last_character = 0;
-            bool is_finished = false;
+            int current_character = 0;
 
-            while (!lca_lexer_is_at_end(lexer) && !is_finished) {
-                int current_character = lexer->current_character;
+            for (;;) {
+                if (!lca_lexer_is_at_end(lexer) && lexer->current_character == '\\') {
+                    lca_lexer_c_skip_backslash_newline(lexer, cpp);
+                }
+
+                if (lca_lexer_is_at_end(lexer)) {
+                    LCA_ASSERT(false, "issue error for unfinished /* comment.");
+                    break;
+                }
+
+                current_character = lexer->current_character;
                 lca_lexer_next_character(lexer);
 
-                if (last_character == '*' && current_character == '/') {
-                    is_finished = true;
+                if (current_character == '\n') {
+                    if (cpp) cpp->at_start_of_line = true;
                 }
+
+                if (current_character == '/' && last_character == '*') {
+                    break;
+                }
+
+                last_character = current_character;
             }
 
-            if (!is_finished) {
-                assert(false && "report lexer error for unfinished C delimited comment");
-            }
-        } else {
-            break;
+            LCA_ASSERT(lca_lexer_is_at_end(lexer) || (current_character == '/' && last_character == '*'), "invalid place to end a /* comment");
+            lexer->current_character = ' ';
         }
     }
 }
 
-static void lca_lexer_c_token_maybe_transform_keyword(lca_lexer_c_token *token) {
+void lca_lexer_skip_c_whitespace(lca_lexer* lexer, lca_lexer_cpp* cpp) {
+    LCA_ASSERT(lexer != NULL, "lexer missing");
+
+    while (!lca_lexer_is_at_end(lexer) && lca_lexer_is_whitespace_impl(lexer->current_character)) {
+        if (lca_lexer_cpp_is_active(cpp) && lexer->current_character == '\n')
+            break;
+
+        lca_lexer_c_next_character(lexer, cpp, true);
+    }
+}
+
+static void lca_lexer_c_token_maybe_transform_keyword(lca_lexer_c_token* token) {
 }
 
 lca_lexer_c_token lca_lexer_read_c_token(lca_lexer* lexer, lca_lexer_cpp* cpp) {
@@ -741,7 +831,6 @@ lca_lexer_c_token lca_lexer_read_c_token(lca_lexer* lexer, lca_lexer_cpp* cpp) {
         lca_lexer_c_macro_expansion* current_macro_expansion = &cpp->macro_expansions[lca_da_count(cpp->macro_expansions) - 1];
 
         if (current_macro_expansion->arg_index >= 0) {
-
         } else {
             LCA_ASSERT(current_macro_expansion->def != NULL, "no macro def associated with this expansion");
 
@@ -774,7 +863,7 @@ regular_lex_c_token:;
     not_a_macro:;
         lca_lexer_c_token_maybe_transform_keyword(&token);
     }
-    
+
     return token;
 }
 
@@ -798,7 +887,7 @@ lca_lexer_c_token lca_lexer_read_c_token_no_keywords(lca_lexer* lexer, lca_lexer
     switch (current_character) {
         case '\n': {
             LCA_ASSERT(lca_lexer_cpp_is_active(cpp), "should only encounter the newline character in the main C token lexer switch if the preprocessor is active.");
-            lca_lexer_next_character(lexer);
+            lca_lexer_c_next_character(lexer, cpp, true);
             token.kind = '\n';
             if (lexer->current_character != 0 && lexer->source_current < lexer->source_end) LCA_ASSERT(cpp->at_start_of_line, "after newline, should always be at start of line");
         } break;
@@ -809,7 +898,7 @@ lca_lexer_c_token lca_lexer_read_c_token_no_keywords(lca_lexer* lexer, lca_lexer
         case '{': case '}':
         case ',': case ';': case ':': {
             // clang-format on
-            lca_lexer_next_character(lexer);
+            lca_lexer_c_next_character(lexer, cpp, true);
             token.kind = current_character;
         } break;
 
@@ -829,7 +918,7 @@ lca_lexer_c_token lca_lexer_read_c_token_no_keywords(lca_lexer* lexer, lca_lexer
         case 'Z': {
             // clang-format on
             while (!lca_lexer_is_at_end(lexer) && lca_lexer_character_is_c_identifier_part(lexer->current_character)) {
-                lca_lexer_next_character(lexer);
+                lca_lexer_c_next_character(lexer, cpp, true);
             }
 
             token.kind = LCA_TOKEN_C_IDENTIFIER;

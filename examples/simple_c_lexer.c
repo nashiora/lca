@@ -11,9 +11,9 @@
 #include <stdio.h>
 
 const char* source_text =
-    "int main() {\n"
+    "int main() { // main function\n"
     //"    fprintf(stderr, \"This is a number: %d\\n\", 69);\n"
-    "    fprintf(stderr, );\n"
+    "    fprintf(stderr, /* test */);\n"
     "}\n";
 
 int main() {
