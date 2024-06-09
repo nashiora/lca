@@ -13,7 +13,7 @@
 const char* source_text =
     "int main() { // main function\n"
     //"    fprintf(stderr, \"This is a number: %d\\n\", 69);\n"
-    "    fprintf(stderr, /* test */);\n"
+    "fprintf(stderr, /* test */);\n"
     "}\n";
 
 int main() {

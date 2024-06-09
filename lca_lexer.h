@@ -721,8 +721,6 @@ static bool lca_lexer_c_skip_backslash_newline(lca_lexer* lexer, lca_lexer_cpp* 
 static void lca_lexer_c_next_character(lca_lexer* lexer, lca_lexer_cpp* cpp, bool allow_comments) {
     LCA_ASSERT(lexer != NULL, "lexer missing");
 
-    lca_lexer_next_character(lexer);
-
     if (lexer->current_character == '\n') {
         if (cpp) cpp->at_start_of_line = true;
     } else if (!lca_lexer_is_whitespace_impl(lexer->current_character) && lexer->current_character != 0) {
@@ -758,6 +756,8 @@ static void lca_lexer_c_next_character(lca_lexer* lexer, lca_lexer_cpp* cpp, boo
 
             LCA_ASSERT(lca_lexer_is_at_end(lexer) || lexer->current_character == '\n', "invalid place to end a // comment");
             lexer->current_character = ' ';
+
+            return;
         } else if (lca_lexer_peek_next_character(lexer) == '*') {
             lca_lexer_next_character(lexer);
             lca_lexer_next_character(lexer);
@@ -791,8 +791,13 @@ static void lca_lexer_c_next_character(lca_lexer* lexer, lca_lexer_cpp* cpp, boo
 
             LCA_ASSERT(lca_lexer_is_at_end(lexer) || (current_character == '/' && last_character == '*'), "invalid place to end a /* comment");
             lexer->current_character = ' ';
+
+            return;
         }
     }
+
+    LCA_ASSERT(!lca_lexer_is_at_end(lexer), "");
+    lca_lexer_next_character(lexer);
 }
 
 void lca_lexer_skip_c_whitespace(lca_lexer* lexer, lca_lexer_cpp* cpp) {
@@ -929,6 +934,7 @@ lca_lexer_c_token lca_lexer_read_c_token_no_keywords(lca_lexer* lexer, lca_lexer
         } break;
 
         default: {
+            printf("%ld: %c\n", (int64_t)(lexer->source_current - lexer->source_begin), lexer->current_character);
             LCA_ASSERT(false, "unhandled character in C token read, report error");
         }
     }
